@@ -1,0 +1,9 @@
+services/node-red/data/
+services/mosquito/logs/
+
+__pycache__/
+*.pyc
+
+*.log
+.env
+
