@@ -11,6 +11,12 @@ dependencies = [
     "paho-mqtt (>=2.1.0,<3.0.0)"
 ]
 
+[tool.poetry]
+name = "nw-backend"
+version = "0.1.0"
+packages = [
+    { include = "py_mqtt_client" }
+]
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
