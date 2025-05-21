@@ -18,4 +18,4 @@ proxy = ["pysocks"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11"
-content-hash = "b4e1d6b4dab1804196794d1a4c57263a09dde023fd5e88da4bebc8c5551ff159"
+content-hash = "da24d899a1df21cb3e52130a6547a648b04569c1eac59edc1235e21c72369141"
