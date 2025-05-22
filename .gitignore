@@ -1,8 +1,6 @@
 services/node-red/data/
 services/mosquito/logs/
 
-python/ai_agent/models
-
 __pycache__/
 *.pyc
 
