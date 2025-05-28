@@ -7,8 +7,25 @@ services:
       - "9001:9001"
         
     volumes:
-      - ./config:/mosquitto/config
-      - ./data:/mosquitto/data
-      - ./log:/mosquitto/log
+      - ./services/mosquitto/config:/mosquitto/config
+      - ./services/mosquitto/log:/mosquitto/log
     restart: unless-stopped
+
+  ai-agent:
+    build:
+      context: ./python/ai_agent
+    container_name: ai-agent
+    restart: unless-stopped
+    depends_on:
+      - mosquitto
+    devices:
+      - "/dev/snd:/dev/snd"  # 🔊 For mic access
+    environment:
+      - MQTT_BROKER=mosquitto
+      - MQTT_PORT=1883
+      - MQTT_CLIENT_ID=ai-agent
+      - MQTT_PUBLISH_TOPIC=environment/audio
+      - AUDIODEVICE=1
+    volumes:
+      - ./python/ai_agent/tf:/models
 

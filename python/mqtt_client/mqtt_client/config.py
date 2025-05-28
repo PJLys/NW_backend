@@ -1,4 +1,4 @@
 BROKER = "localhost"
 PORT = 1883
-TOPIC = "test/topic"
-CLIENT_ID = "pyClient"
+TOPIC = "environment/sound"
+CLIENT_ID = "env_sound"

@@ -16,6 +16,7 @@ argparse = "^1.4.0"
 scipy = "1.12"
 tflite-support = "^0.4.4"
 sounddevice = "^0.5.2"
+paho-mqtt = "^2.1.0"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

@@ -1,135 +1,110 @@
-# Copyright 2021 The TensorFlow Authors. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""Main scripts to run audio classification."""
-
 import argparse
 import time
+import numpy as np
+import sounddevice as sd
+from scipy.signal import resample
 
 from tflite_support.task import audio
 from tflite_support.task import core
 from tflite_support.task import processor
+from ai_agent.mqtt.client import MQTTPublisher
 from utils import Plotter
 
+mqtt = MQTTPublisher()
+
+def list_input_devices():
+    print("🔍 Listing ALSA audio capture devices:")
+    devices = sd.query_devices()
+    for i, dev in enumerate(devices):
+        if dev['max_input_channels'] > 0:
+            print(f"{'>' if i == sd.default.device[0] else ' '} {i} {dev['name']} ({dev['hostapi']})")
 
 def run(model: str, max_results: int, score_threshold: float,
         overlapping_factor: float, num_threads: int,
         enable_edgetpu: bool) -> None:
-  """Continuously run inference on audio data acquired from the device.
+    """Continuously run inference on audio data from microphone."""
 
-  Args:
-    model: Name of the TFLite audio classification model.
-    max_results: Maximum number of classification results to display.
-    score_threshold: The score threshold of classification results.
-    overlapping_factor: Target overlapping between adjacent inferences.
-    num_threads: Number of CPU threads to run the model.
-    enable_edgetpu: Whether to run the model on EdgeTPU.
-  """
+    list_input_devices()
 
-  if (overlapping_factor <= 0) or (overlapping_factor >= 1.0):
-    raise ValueError('Overlapping factor must be between 0 and 1.')
+    # Model setup
+    base_options = core.BaseOptions(
+        file_name=model, use_coral=enable_edgetpu, num_threads=num_threads)
+    classification_options = processor.ClassificationOptions(
+        max_results=max_results, score_threshold=score_threshold)
+    options = audio.AudioClassifierOptions(
+        base_options=base_options, classification_options=classification_options)
+    classifier = audio.AudioClassifier.create_from_options(options)
 
-  if (score_threshold < 0) or (score_threshold > 1.0):
-    raise ValueError('Score threshold must be between (inclusive) 0 and 1.')
+    # Audio config
+    model_sample_rate = classifier.required_audio_format.sample_rate
+    channels = classifier.required_audio_format.channels
+    duration = 1.0  # seconds
+    mic_sample_rate = 44100  # standard mic sample rate
+    num_samples = int(mic_sample_rate * duration)
 
-  # Initialize the audio classification model.
-  base_options = core.BaseOptions(
-      file_name=model, use_coral=enable_edgetpu, num_threads=num_threads)
-  classification_options = processor.ClassificationOptions(
-      max_results=max_results, score_threshold=score_threshold)
-  options = audio.AudioClassifierOptions(
-      base_options=base_options, classification_options=classification_options)
-  classifier = audio.AudioClassifier.create_from_options(options)
+    tensor_audio = classifier.create_input_tensor_audio()
+    input_buffer_size = len(tensor_audio.buffer)
 
-  # Initialize the audio recorder and a tensor to store the audio input.
-  audio_record = classifier.create_audio_record()
-  tensor_audio = classifier.create_input_tensor_audio()
+    print(f"🎙 Mic sample rate: {mic_sample_rate}, Model expects: {model_sample_rate}")
+    print(f"🎛 Input buffer size: {input_buffer_size}, Duration: {duration} sec")
 
-  # We'll try to run inference every interval_between_inference seconds.
-  # This is usually half of the model's input length to create an overlapping
-  # between incoming audio segments to improve classification accuracy.
-  input_length_in_second = float(len(
-      tensor_audio.buffer)) / tensor_audio.format.sample_rate
-  interval_between_inference = input_length_in_second * (1 - overlapping_factor)
-  pause_time = interval_between_inference * 0.1
-  last_inference_time = time.time()
+    def audio_callback(indata, frames, time_info, status):
+        if status:
+            print(f"[WARN] Sounddevice status: {status}")
+        try:
+            mono_data = indata[:, 0] if indata.shape[1] > 1 else indata[:, 0]
+            print(f"🔊 Raw input shape: {mono_data.shape}")
 
-  # Initialize a plotter instance to display the classification results.
-  plotter = Plotter()
+            # Resample to match model's sample rate
+            resampled = resample(mono_data, int(model_sample_rate * duration))
+            resampled = resampled.astype(np.float32)
+            print(f"🎚 Resampled shape: {resampled.shape}")
 
-  # Start audio recording in the background.
-  audio_record.start_recording()
+            # Reshape to (samples, channels)
+            input_array = np.reshape(resampled, (-1, channels))
+            tensor_audio.load_from_array(input_array)
 
-  # Loop until the user close the classification results plot.
-  while True:
-    # Wait until at least interval_between_inference seconds has passed since
-    # the last inference.
-    now = time.time()
-    diff = now - last_inference_time
-    if diff < interval_between_inference:
-      time.sleep(pause_time)
-      continue
-    last_inference_time = now
-    print("---")
-    # Load the input audio and run classify.
-    tensor_audio.load_from_audio_record(audio_record)
-    result = classifier.classify(tensor_audio)
-    print(result)
+            # Classify
+            result = classifier.classify(tensor_audio)
+            if result.classifications:
+                classification = result.classifications[0]
+                if classification.categories:
+                    top = classification.categories[0]
+                    mqtt.publish(top.category_name, top.score, logging=True)
+                    print(f"✅ Detected: {top.category_name} ({top.score:.2f})")
+                else:
+                    print("ℹ️ No categories returned.")
+            else:
+                print("ℹ️ No classification results.")
 
-    # Plot the classification results.
-    plotter.plot(result)
+        except Exception as e:
+            print(f"[ERROR] Audio capture or inference failed: {e}")
 
+    try:
+        with sd.InputStream(samplerate=mic_sample_rate,
+                            channels=channels,
+                            callback=audio_callback,
+                            dtype='float32'):
+            print("🚀 Listening... Press Ctrl+C to stop.")
+            while True:
+                time.sleep(1)
+    except KeyboardInterrupt:
+        print("🛑 Stopped by user.")
+    except Exception as e:
+        print(f"[FATAL] Could not start input stream: {e}")
 
 def main():
-  parser = argparse.ArgumentParser(
-      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-  parser.add_argument(
-      '--model',
-      help='Name of the audio classification model.',
-      required=False,
-      default='yamnet.tflite')
-  parser.add_argument(
-      '--maxResults',
-      help='Maximum number of results to show.',
-      required=False,
-      default=5)
-  parser.add_argument(
-      '--overlappingFactor',
-      help='Target overlapping between adjacent inferences. Value must be in (0, 1)',
-      required=False,
-      default=0.5)
-  parser.add_argument(
-      '--scoreThreshold',
-      help='The score threshold of classification results.',
-      required=False,
-      default=0.0)
-  parser.add_argument(
-      '--numThreads',
-      help='Number of CPU threads to run the model.',
-      required=False,
-      default=4)
-  parser.add_argument(
-      '--enableEdgeTPU',
-      help='Whether to run the model on EdgeTPU.',
-      action='store_true',
-      required=False,
-      default=False)
-  args = parser.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model', default='yamnet.tflite', help='TFLite model path')
+    parser.add_argument('--maxResults', default=5, type=int)
+    parser.add_argument('--overlappingFactor', default=0.5, type=float)
+    parser.add_argument('--scoreThreshold', default=0.0, type=float)
+    parser.add_argument('--numThreads', default=4, type=int)
+    parser.add_argument('--enableEdgeTPU', action='store_true')
+    args = parser.parse_args()
 
-  run(args.model, int(args.maxResults), float(args.scoreThreshold),
-      float(args.overlappingFactor), int(args.numThreads),
-      bool(args.enableEdgeTPU))
-
+    run(args.model, args.maxResults, args.scoreThreshold,
+        args.overlappingFactor, args.numThreads, args.enableEdgeTPU)
 
 if __name__ == '__main__':
-  main()
+    main()
